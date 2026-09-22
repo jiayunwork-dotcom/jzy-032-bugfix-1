@@ -67,7 +67,7 @@ def tick_run(session: Session, run: Run, dispatch: DispatchCallback) -> None:
         if node.status != NODE_PENDING:
             continue
         upstream = preds[key]
-        if upstream and all(nodes[p].status in (models.NODE_FAILED, models.NODE_SKIPPED) for p in upstream):
+        if upstream and any(nodes[p].status in (models.NODE_FAILED, models.NODE_SKIPPED) for p in upstream):
             node.status = models.NODE_SKIPPED
             node.finished_at = now
             node.last_error = "上游失败或被跳过，不满足触发条件"

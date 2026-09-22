@@ -131,6 +131,89 @@ async def test_failed_upstream_skips_downstream_but_not_siblings():
     assert not any(a["node_key"] in ("b", "c") for a in attempts_of(sf, rid))
 
 
+async def test_join_with_mixed_upstream_outcomes_is_skipped():
+    """Regression: join node c with two upstreams — a always fails, b
+    succeeds; d is independent. c must be marked skipped (never executed),
+    and the run must finalize as failed instead of hanging with c stuck in
+    pending forever."""
+    sf = make_session_factory()
+    gid = build_graph(
+        sf,
+        nodes={
+            "a": {"duration": 0.01, "always_fail": True},
+            "b": {"duration": 0.01},
+            "c": {"duration": 0.01},
+            "d": {"duration": 0.01},
+        },
+        edges=[("a", "c"), ("b", "c")],
+    )
+    rid = start_run(sf, gid)
+    # Before the fix the run never reached a terminal status (c stayed
+    # pending); wait_run would time out here.
+    assert await run_to_completion(sf, rid) == "failed"
+
+    nodes = run_snapshot(sf, rid)["nodes"]
+    assert nodes["a"]["status"] == "failed"
+    assert nodes["b"]["status"] == "succeeded"
+    assert nodes["c"]["status"] == "skipped"
+    assert nodes["d"]["status"] == "succeeded"
+    # The join node never executed.
+    assert nodes["c"]["attempts"] == 0
+    assert not any(a["node_key"] == "c" for a in attempts_of(sf, rid))
+
+
+async def test_join_with_skipped_and_succeeded_upstreams_is_skipped():
+    """Mixed outcomes via propagation: x fails -> y is skipped; the join w
+    (upstreams y skipped, z succeeded) must also be skipped, not left
+    pending."""
+    sf = make_session_factory()
+    gid = build_graph(
+        sf,
+        nodes={
+            "x": {"duration": 0.01, "always_fail": True},
+            "y": {"duration": 0.01},
+            "z": {"duration": 0.01},
+            "w": {"duration": 0.01},
+        },
+        edges=[("x", "y"), ("y", "w"), ("z", "w")],
+    )
+    rid = start_run(sf, gid)
+    assert await run_to_completion(sf, rid) == "failed"
+
+    nodes = run_snapshot(sf, rid)["nodes"]
+    assert nodes["x"]["status"] == "failed"
+    assert nodes["y"]["status"] == "skipped"
+    assert nodes["z"]["status"] == "succeeded"
+    assert nodes["w"]["status"] == "skipped"
+    assert nodes["w"]["attempts"] == 0
+
+
+async def test_join_waits_for_retrying_upstream_before_firing():
+    """A flaky upstream that recovers on retry must not get its join skipped
+    during backoff: fail_times=1 with one retry — the join fires only after
+    the retried attempt succeeds, and the run succeeds."""
+    sf = make_session_factory()
+    gid = build_graph(
+        sf,
+        nodes={
+            "flaky": {"duration": 0.01, "fail_times": 1, "max_retries": 1, "interval": 0.05},
+            "ok": {"duration": 0.01},
+            "join": {"duration": 0.01},
+        },
+        edges=[("flaky", "join"), ("ok", "join")],
+    )
+    rid = start_run(sf, gid)
+    assert await run_to_completion(sf, rid) == "succeeded"
+
+    nodes = run_snapshot(sf, rid)["nodes"]
+    assert nodes["flaky"]["status"] == "succeeded"
+    assert nodes["flaky"]["attempts"] == 2
+    assert nodes["join"]["status"] == "succeeded"
+    assert nodes["join"]["attempts"] == 1
+    # The join started only after the flaky upstream's final success.
+    assert nodes["join"]["started_at"] >= nodes["flaky"]["finished_at"]
+
+
 async def test_retry_exhaustion_then_failure_without_blocking_siblings():
     """x fails every attempt with max_retries=2 -> exactly 3 attempts, then
     failed. Sibling branch y completes while x is still backing off."""
