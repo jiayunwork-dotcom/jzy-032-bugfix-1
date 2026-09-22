@@ -131,6 +131,79 @@ async def test_failed_upstream_skips_downstream_but_not_siblings():
     assert not any(a["node_key"] in ("b", "c") for a in attempts_of(sf, rid))
 
 
+async def test_join_with_mixed_upstream_outcomes_is_skipped():
+    """Regression: join node c depends on both a and b; a always fails while
+    b succeeds, and d is an independent branch. The join must not hang in
+    pending waiting for all predecessors to succeed — one non-succeeded
+    predecessor makes it unsatisfiable, so c is skipped and the run finishes
+    as failed."""
+    sf = make_session_factory()
+    gid = build_graph(
+        sf,
+        nodes={
+            "a": {"duration": 0.01, "always_fail": True},
+            "b": {"duration": 0.02},
+            "c": {"duration": 0.01},
+            "d": {"duration": 0.01},
+        },
+        edges=[("a", "c"), ("b", "c")],
+    )
+    rid = start_run(sf, gid)
+    assert await run_to_completion(sf, rid) == "failed"
+
+    nodes = run_snapshot(sf, rid)["nodes"]
+    assert nodes["a"]["status"] == "failed"
+    assert nodes["b"]["status"] == "succeeded"
+    assert nodes["d"]["status"] == "succeeded"
+    assert nodes["c"]["status"] == "skipped"
+    # The skipped join was never executed.
+    assert nodes["c"]["attempts"] == 0
+    assert not any(a["node_key"] == "c" for a in attempts_of(sf, rid))
+
+
+async def test_join_with_skipped_and_succeeded_upstreams_is_skipped():
+    """Same hang via the other mixed outcome: a fails and skips its pure
+    downstream b, while x succeeds; join c depends on b (skipped) and x
+    (succeeded). c must still be skipped and the run must finish failed."""
+    sf = make_session_factory()
+    gid = build_graph(
+        sf,
+        nodes={
+            "a": {"duration": 0.01, "always_fail": True},
+            "b": {"duration": 0.01},
+            "x": {"duration": 0.02},
+            "c": {"duration": 0.01},
+        },
+        edges=[("a", "b"), ("b", "c"), ("x", "c")],
+    )
+    rid = start_run(sf, gid)
+    assert await run_to_completion(sf, rid) == "failed"
+
+    nodes = run_snapshot(sf, rid)["nodes"]
+    assert nodes["a"]["status"] == "failed"
+    assert nodes["b"]["status"] == "skipped"
+    assert nodes["x"]["status"] == "succeeded"
+    assert nodes["c"]["status"] == "skipped"
+    assert nodes["c"]["attempts"] == 0
+
+
+async def test_join_runs_when_all_upstreams_succeed():
+    """Guards the fix's other half: a join with multiple predecessors still
+    executes normally once every predecessor succeeded."""
+    sf = make_session_factory()
+    gid = build_graph(
+        sf,
+        nodes={k: {"duration": 0.01} for k in ["a", "b", "c"]},
+        edges=[("a", "c"), ("b", "c")],
+    )
+    rid = start_run(sf, gid)
+    assert await run_to_completion(sf, rid) == "succeeded"
+
+    nodes = run_snapshot(sf, rid)["nodes"]
+    assert all(n["status"] == "succeeded" for n in nodes.values())
+    assert nodes["c"]["attempts"] == 1
+
+
 async def test_retry_exhaustion_then_failure_without_blocking_siblings():
     """x fails every attempt with max_retries=2 -> exactly 3 attempts, then
     failed. Sibling branch y completes while x is still backing off."""

@@ -61,13 +61,15 @@ def tick_run(session: Session, run: Run, dispatch: DispatchCallback) -> None:
 
     # 1) Skip propagation (topological order): a pending node whose any
     #    predecessor failed or was skipped is itself marked skipped — it is
-    #    "not satisfiable", never executed.
+    #    "not satisfiable", never executed. One non-succeeded predecessor is
+    #    enough even when other predecessors succeeded (a join with mixed
+    #    upstream outcomes can never become ready).
     for key in run.topo_order:
         node = nodes[key]
         if node.status != NODE_PENDING:
             continue
         upstream = preds[key]
-        if upstream and all(nodes[p].status in (models.NODE_FAILED, models.NODE_SKIPPED) for p in upstream):
+        if upstream and any(nodes[p].status in (models.NODE_FAILED, models.NODE_SKIPPED) for p in upstream):
             node.status = models.NODE_SKIPPED
             node.finished_at = now
             node.last_error = "上游失败或被跳过，不满足触发条件"
